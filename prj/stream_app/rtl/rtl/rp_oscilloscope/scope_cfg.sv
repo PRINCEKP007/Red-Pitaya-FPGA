@@ -80,6 +80,8 @@ module scope_cfg
    output wire [  DEC_SHIFT_BITS-1:0]  cfg_dec_rshift_o        ,
    output wire                         cfg_avg_en_o            ,
    output wire                         cfg_hres_en_o           ,
+   output wire [               4-1:0]  cfg_ddc_en_o            ,
+   output wire [            4*32-1:0]  cfg_ddc_pinc_o          ,
    output wire [              32-1:0]  cfg_loopback_o          ,
    output wire                         cfg_8bit_dat_o          ,
    output wire                         cfg_legacy_calib_o      ,
@@ -171,6 +173,11 @@ localparam CALIB_GAIN_ADDR_CH1      = 12'h78;  // Calibraton gain CH1
 localparam CALIB_OFFSET_ADDR_CH2    = 12'h7C;  // Calibraton offset CH2
 localparam CALIB_GAIN_ADDR_CH2      = 12'h80;  // Calibraton gain CH2
 localparam LEGACY_CALIB_EN_ADDR     = 12'h84;  // bit0 enables legacy post-filter calibration
+localparam DDC_CTRL_ADDR            = 12'h88;  // bit n enables the down-converter on channel n+1
+localparam DDC_PINC_ADDR_CH1        = 12'h8C;  // DDC NCO phase increment CH1 (fc = pinc * fs / 2^32)
+localparam DDC_PINC_ADDR_CH2        = 12'h90;  // DDC NCO phase increment CH2
+localparam DDC_PINC_ADDR_CH3        = 12'h18C; // DDC NCO phase increment CH3
+localparam DDC_PINC_ADDR_CH4        = 12'h190; // DDC NCO phase increment CH4
 localparam BUF1_LOST_SAMP_CNT_CH2   = 12'h9C;  // Number of lost samples in buffer 1
 localparam BUF2_LOST_SAMP_CNT_CH2   = 12'hA0;  // Number of lost samples in buffer 2
 localparam CURR_WP_CH1              = 12'hA4;  //current write pointer CH1
@@ -238,6 +245,8 @@ reg                         cfg_trig_edge;
 
 reg                         cfg_avg_en; 
 reg                         cfg_hres_en;
+reg  [             4-1:0]   cfg_ddc_en;
+reg  [          4*32-1:0]   cfg_ddc_pinc;
 reg  [  DEC_CNT_BITS-1:0]   cfg_dec_factor;  
 reg  [DEC_SHIFT_BITS-1:0]   cfg_dec_rshift;  
 reg  [            32-1:0]   cfg_loopback;
@@ -412,6 +421,8 @@ begin
       cfg_dec_rshift          <=   'h0;
       cfg_avg_en              <=  1'b0;
       cfg_hres_en             <=  1'b0;
+      cfg_ddc_en              <=  4'h0;
+      cfg_ddc_pinc            <= {4{32'h0}};
       cfg_loopback            <= 32'h0;
       cfg_filt_bypass         <=  1'b1;
       cfg_8bit_dat            <=  1'b0;
@@ -441,6 +452,12 @@ begin
       if (reg_write_adc && (reg_ofs_adc[12-1:0]==SHIFT_8BIT)            )  cfg_8bit_dat            <= reg_wdat_adc[0];
       if (reg_write_adc && (reg_ofs_adc[12-1:0]==FILT_BYPASS_ADDR)      )  cfg_filt_bypass         <= reg_wdat_adc[0];
       if (reg_write_adc && (reg_ofs_adc[12-1:0]==LEGACY_CALIB_EN_ADDR)  )  cfg_legacy_calib        <= reg_wdat_adc[0];
+      if (reg_write_adc && (reg_ofs_adc[12-1:0]==DDC_CTRL_ADDR)         )  cfg_ddc_en              <= reg_wdat_adc[4-1:0];
+
+      if (reg_write_adc && (reg_ofs_adc[12-1:0]==DDC_PINC_ADDR_CH1)     )  cfg_ddc_pinc[1*32-1:0*32]      <= reg_wdat_adc;
+      if (reg_write_adc && (reg_ofs_adc[12-1:0]==DDC_PINC_ADDR_CH2)     )  cfg_ddc_pinc[2*32-1:1*32]      <= reg_wdat_adc;
+      if (reg_write_adc && (reg_ofs_adc[12-1:0]==DDC_PINC_ADDR_CH3)     )  cfg_ddc_pinc[3*32-1:2*32]      <= reg_wdat_adc;
+      if (reg_write_adc && (reg_ofs_adc[12-1:0]==DDC_PINC_ADDR_CH4)     )  cfg_ddc_pinc[4*32-1:3*32]      <= reg_wdat_adc;
 
       if (reg_write_adc && (reg_ofs_adc[12-1:0]==CALIB_OFFSET_ADDR_CH1) )  cfg_calib_offset[1*16-1:0*16]  <= reg_wdat_adc[16-1:0];
       if (reg_write_adc && (reg_ofs_adc[12-1:0]==CALIB_OFFSET_ADDR_CH2) )  cfg_calib_offset[2*16-1:1*16]  <= reg_wdat_adc[16-1:0];
@@ -499,6 +516,11 @@ begin
       LOOPBACK_ADDR          : begin  reg_ack_adc = 1'b1;       reg_rdat_adc =                               cfg_loopback;              end
       SHIFT_8BIT             : begin  reg_ack_adc = 1'b1;       reg_rdat_adc = {{32- 1{1'b0}}              , cfg_8bit_dat};             end
       LEGACY_CALIB_EN_ADDR   : begin  reg_ack_adc = 1'b1;       reg_rdat_adc = {{32- 1{1'b0}}              , cfg_legacy_calib};         end
+      DDC_CTRL_ADDR          : begin  reg_ack_adc = 1'b1;       reg_rdat_adc = {{32- 4{1'b0}}              , cfg_ddc_en};               end
+      DDC_PINC_ADDR_CH1      : begin  reg_ack_adc = 1'b1;       reg_rdat_adc =                               cfg_ddc_pinc[1*32-1:0*32]; end
+      DDC_PINC_ADDR_CH2      : begin  reg_ack_adc = 1'b1;       reg_rdat_adc =                               cfg_ddc_pinc[2*32-1:1*32]; end
+      DDC_PINC_ADDR_CH3      : begin  reg_ack_adc = 1'b1;       reg_rdat_adc =                               cfg_ddc_pinc[3*32-1:2*32]; end
+      DDC_PINC_ADDR_CH4      : begin  reg_ack_adc = 1'b1;       reg_rdat_adc =                               cfg_ddc_pinc[4*32-1:3*32]; end
 
       DIAG_REG1              : begin  reg_ack_adc = 1'b1;       reg_rdat_adc =                                diag1_i;                  end
       DIAG_REG2              : begin  reg_ack_adc = 1'b1;       reg_rdat_adc =                                diag2_i;                  end
@@ -645,6 +667,8 @@ assign cfg_dec_factor_o        = cfg_dec_factor;
 assign cfg_dec_rshift_o        = cfg_dec_rshift;
 assign cfg_avg_en_o            = cfg_avg_en;
 assign cfg_hres_en_o           = cfg_hres_en;
+assign cfg_ddc_en_o            = cfg_ddc_en;
+assign cfg_ddc_pinc_o          = cfg_ddc_pinc;
 assign cfg_loopback_o          = cfg_loopback;
 assign cfg_8bit_dat_o          = cfg_8bit_dat;
 assign cfg_legacy_calib_o      = cfg_legacy_calib;
