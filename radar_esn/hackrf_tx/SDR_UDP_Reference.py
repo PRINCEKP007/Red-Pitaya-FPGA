@@ -166,7 +166,7 @@ class ReferenceComparator:
         self.lock = threading.RLock()
         self.mode = "UDP"
         self.settle_seconds = 0.5
-        self.manual = (350.0, 100.0)
+        self.manual = (325.0, 3500.0)
         self.packet = None
         self.arrived = None
         self.changed = clock()
@@ -184,7 +184,7 @@ class ReferenceComparator:
         self.last = None
         self.reason = "Waiting for eligible prediction"
 
-    def configure(self, mode, settle_ms, pw_us=350.0, bw_khz=100.0):
+    def configure(self, mode, settle_ms, pw_us=325.0, bw_khz=3500.0):
         config = (mode, float(settle_ms) / 1000, (float(pw_us), float(bw_khz)))
         with self.lock:
             if config != (self.mode, self.settle_seconds, self.manual):

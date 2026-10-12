@@ -35,11 +35,13 @@ FILTER_BWS = (1.75, 2.5, 3.5, 5, 5.5, 6, 7, 8, 9, 10, 12, 14, 15, 20, 24, 28)
 
 @dataclasses.dataclass(frozen=True)
 class TxSettings:
-    carrier_mhz: float = 3876.0
-    sample_rate_msps: float = 16.0
+    # Defaults match the trained ESN: 1 GHz, 20 MSPS, fixed 512 us PRI,
+    # PW 300-350 us and BW 3-4 MHz (mid-range shown).
+    carrier_mhz: float = 1000.0
+    sample_rate_msps: float = 20.0
     pri_us: float = 512.0
-    pw_us: float = 350.0
-    bandwidth_khz: float = 100.0
+    pw_us: float = 325.0
+    bandwidth_khz: float = 3500.0
     offset_khz: float = 0.0
     gain_db: int = 16
     amp_enabled: bool = False
@@ -788,10 +790,10 @@ class TransmitterGUI:
 def self_test():
     """Checks signal timing and callback continuity without a GUI or SDR."""
     settings = TxSettings().validate()
-    assert settings.period_samples == 8192
-    assert settings.pulse_samples == 5600
+    assert settings.period_samples == 10240
+    assert settings.pulse_samples == 6500
     period = make_period(settings)
-    assert len(period) == 16384 and period.dtype == np.int8
+    assert len(period) == 20480 and period.dtype == np.int8
     assert np.all(period[2*settings.pulse_samples:] == 0)
     assert np.max(np.abs(period.astype(np.int16))) <= 127
     assert period[0] == round(127 * settings.amplitude)
@@ -807,7 +809,7 @@ def self_test():
     assert stream.total_bytes == len(actual)
     # PRI must NOT be changed to satisfy a USB alignment requirement.
     unusual = dataclasses.replace(settings, pri_us=513.13, pw_us=349.14)
-    assert unusual.period_samples == round(unusual.pri_us * 16)
+    assert unusual.period_samples == round(unusual.pri_us * settings.sample_rate_msps)
     assert unusual.period_samples % 1024 != 0
     assert len(make_period(unusual)) == 2*unusual.period_samples
     down = make_period(dataclasses.replace(settings, direction="Down chirp"))
@@ -815,6 +817,7 @@ def self_test():
     np.testing.assert_array_equal(down[1::2], -period[1::2])
     for change in ({"sample_rate_msps": 31.25}, {"gain_db": 48}, {"pw_us": 600},
                    {"bandwidth_khz": 17000}, {"offset_khz": 9000}, {"amplitude": 1.1},
+                   {"sample_rate_msps": 7},
                    {"pri_us": float("nan")}, {"pw_us": 511.999, "pri_us": 512},
                    {"filter_mhz": "1.75", "bandwidth_khz": 2000}):
         try:

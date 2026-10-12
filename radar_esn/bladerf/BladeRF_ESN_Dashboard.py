@@ -19,7 +19,7 @@ import time
 import numpy as np
 
 from SDR_UDP_Reference import UDP_PORT, UDPListener, ReferenceComparator
-from scipy.sparse import csr_matrix
+from esn_core import EsnModel
 
 # These are C header macros, not shared-library symbols. CFFI bindings may
 # omit them even though metadata streaming is supported. Values from Nuand:
@@ -27,10 +27,6 @@ from scipy.sparse import csr_matrix
 BLADERF_META_FLAG_RX_NOW = 1 << 31
 BLADERF_META_STATUS_OVERRUN = 1 << 0
 
-try:
-    from numba import njit
-except ImportError:
-    njit = None
 try:
     from threadpoolctl import threadpool_limits
 except ImportError:
@@ -45,7 +41,7 @@ class Settings:
     model_path: str = str(Path(__file__).resolve().parent / "esn_model.npz")
     source: str = "bladeRF"       # "bladeRF" or "Replay I/Q file"
     replay_path: str = "ESN_Train.bin"  # Raw little-endian complex128, column order F.
-    frequency_mhz: float = 3876.0  # Match the actual carrier in your HackRF UI.
+    frequency_mhz: float = 1000.0  # Match the actual carrier in your HackRF UI.
     gain_db: int = 30             # Match the receiver settings used for training.
     bandwidth_mhz: float = 20.0
     rx_port: int = 1              # Physical RX1=1, RX2=2; Python indices are 0/1.
@@ -105,100 +101,31 @@ class Settings:
 CONFIG = Settings()
 
 
-def _energy_kernel(measurements, win, data, indices, indptr):
-    """Same split-I/Q tanh activation and pooling as the training helper."""
-    neurons = win.shape[0]
-    state = np.zeros(neurons, dtype=np.complex128)
-    energy = np.zeros(neurons, dtype=np.float64)
-    for t in range(measurements.shape[0]):
-        next_state = np.empty(neurons, dtype=np.complex128)
-        for row in range(neurons):
-            z = 0.0j
-            for k in range(indptr[row], indptr[row + 1]):
-                z += data[k] * state[indices[k]]
-            for channel in range(win.shape[1]):
-                z += win[row, channel] * measurements[t, channel]
-            re, im = np.tanh(z.real), np.tanh(z.imag)
-            next_state[row] = re + 1j * im
-            energy[row] += re * re + im * im
-        state = next_state
-    return energy / measurements.shape[0]
-
-
-_compiled_energy = njit(cache=True, nogil=True)(_energy_kernel) if njit is not None else None
-
-
 class SavedESN:
-    """Load the exact capitalized NPZ keys saved by uploaded TrainESN_1.py."""
+    """Model saved by TrainESN_1.py: separate PW and BW readouts (PRI is fixed).
+
+    Feature extraction and readouts live in esn_core.py, shared with training.
+    Older single-W_readout models still load (both readouts use reservoir features).
+    """
     def __init__(self, path, settings):
-        required = ("W_readout", "Win", "Wres", "Phi_local", "X_mean", "X_std",
-                    "Y_mean", "Y_std", "BLOCK_SIZE", "STRIDE", "Fs")
-        with np.load(path, allow_pickle=False) as archive:
-            missing = set(required) - set(archive.files)
-            if missing:
-                raise ValueError("Model must be from TrainESN_1.py; missing: " + ", ".join(sorted(missing)))
-            saved = {name: archive[name].copy() for name in archive.files}
-        self.fs = float(saved["Fs"].item())
+        self.model = EsnModel.load(path, samples_per_pri=settings.samples_per_pri)
+        self.fs = self.model.fs
         if not np.isfinite(self.fs) or not np.isclose(self.fs, settings.fs, rtol=0, atol=0.5):
             raise ValueError(f"Saved model Fs={self.fs:g} Hz does not match RX Fs={settings.fs:g} Hz.")
-        self.block_size = int(saved["BLOCK_SIZE"].item())
-        self.stride = int(saved["STRIDE"].item())
-        self.phi = np.ascontiguousarray(saved["Phi_local"], dtype=np.complex128)
-        self.win = np.ascontiguousarray(saved["Win"], dtype=np.complex128)
-        dense = np.asarray(saved["Wres"], dtype=np.complex128)
-        self.readout = np.asarray(saved["W_readout"], dtype=np.float64)
-        self.x_mean = np.asarray(saved["X_mean"], dtype=np.float64).reshape(-1)
-        self.x_std = np.asarray(saved["X_std"], dtype=np.float64).reshape(-1)
-        self.y_mean = np.asarray(saved["Y_mean"], dtype=np.float64).reshape(-1)
-        self.y_std = np.asarray(saved["Y_std"], dtype=np.float64).reshape(-1)
-        self.samples = settings.window_samples  # Uploaded model does not save N.
-        if dense.ndim != 2 or dense.shape[0] != dense.shape[1]:
-            raise ValueError("Wres must be a square matrix.")
-        self.neurons = dense.shape[0]
-        if self.block_size < 1 or self.stride < 1 or self.block_size > self.samples:
+        self.samples = settings.window_samples
+        reservoir = self.model.reservoir
+        if reservoir is not None and not 1 <= reservoir.block_size <= self.samples:
             raise ValueError("Invalid compression block size/stride in model.")
-        if self.phi.ndim != 2 or self.phi.shape[1] != self.block_size:
-            raise ValueError("Phi_local shape does not match BLOCK_SIZE.")
-        if self.win.shape != (self.neurons, self.phi.shape[0]):
-            raise ValueError("Win dimensions do not match Wres and Phi_local.")
-        if self.readout.shape != (self.neurons + 1, 2):
-            raise ValueError("W_readout must have shape (neurons+1, 2) for PW/BW.")
-        if self.x_mean.size != self.neurons or self.x_std.size != self.neurons:
-            raise ValueError("Feature normalization shape does not match reservoir.")
-        if self.y_mean.size != 2 or self.y_std.size != 2:
-            raise ValueError("Target normalization must contain PW and BW.")
-        for array in (dense, self.phi, self.win, self.readout, self.x_mean, self.x_std,
-                      self.y_mean, self.y_std):
-            if not np.isfinite(array).all():
-                raise ValueError("Saved model contains non-finite weights/statistics.")
-        if np.any(self.x_std <= 0) or np.any(self.y_std <= 0):
-            raise ValueError("Saved standard deviations must be positive.")
-        self.wres = csr_matrix(dense)
-        self.backend = "Numba" if _compiled_energy is not None else "SciPy sparse"
+        self.description = self.model.describe()
 
-    def features(self, iq):
+    def predict(self, iq):
         x = np.asarray(iq, dtype=np.complex128)
         if x.shape != (self.samples,) or not np.isfinite(x).all():
             raise ValueError(f"Expected {self.samples} finite complex samples per inference.")
-        blocks = np.lib.stride_tricks.sliding_window_view(x, self.block_size)[::self.stride]
-        y = np.ascontiguousarray(blocks @ self.phi.T)
-        if _compiled_energy is not None:
-            return _compiled_energy(y, self.win, self.wres.data, self.wres.indices, self.wres.indptr)
-        state = np.zeros(self.neurons, dtype=np.complex128)
-        energy = np.zeros(self.neurons, dtype=np.float64)
-        for measurement in y:
-            z = self.wres @ state + self.win @ measurement
-            state = np.tanh(z.real) + 1j * np.tanh(z.imag)
-            energy += state.real**2 + state.imag**2
-        return energy / len(y)
-
-    def predict(self, iq):
-        f = self.features(iq)
-        augmented = np.r_[1.0, (f - self.x_mean) / self.x_std]
-        output = (augmented @ self.readout) * self.y_std + self.y_mean
-        if not np.isfinite(output).all():
+        output, info = self.model.predict(x)
+        if not all(np.isfinite(v) for v in output.values()):
             raise ValueError("ESN returned non-finite predictions.")
-        return output  # PW in us; BW in MHz, as in the training script.
+        return output["PW"], output["BW"], info   # PW in us, BW in kHz
 
 
 def decode_sc16_q11(buffer, divisor):
@@ -493,8 +420,7 @@ class ReceiverSession:
                 with self.lock:
                     self.stats["state"] = "Loading model"
                 model = SavedESN(self.settings.model_path, self.settings)
-                self.note(f"Model loaded: {model.neurons} neurons, {model.backend}, "
-                          f"block={model.block_size}, stride={model.stride}.")
+                self.note("Model loaded: " + model.description + ".")
                 self.note("Preparing inference before starting the receive stream...")
                 model.predict(np.zeros(self.settings.window_samples, dtype=np.complex128))
                 if self.stop_event.is_set():
@@ -587,21 +513,23 @@ class ReceiverSession:
                 if frame is None:
                     break
                 started = time.monotonic()
-                output = model.predict(frame.iq)
+                pw_us, bw_khz, pulse = model.predict(frame.iq)
                 duration_ms = (time.monotonic() - started) * 1000
                 power_dbfs = float(10*np.log10(max(float(np.mean(np.abs(frame.iq)**2)), 1e-20)))
                 clip_level = 2047.0 / self.settings.iq_divisor
                 clipping_percent = float(100*np.mean((np.abs(frame.iq.real) >= clip_level) |
                                                      (np.abs(frame.iq.imag) >= clip_level)))
-                pw_us, bw_mhz = map(float, output)
-                valid = 0 < pw_us <= self.settings.pri_us and 0 < bw_mhz <= self.settings.fs / 1e6
+                valid = 0 < pw_us <= self.settings.pri_us and 0 < bw_khz <= self.settings.fs / 1e3
                 quality = ("Low signal" if power_dbfs < self.settings.minimum_power_dbfs else
+                           "No pulse detected" if not pulse["detected"] else
                            "Clipping" if clipping_percent > 0.01 else
                            "Out of range" if not valid else "Estimate available")
                 if self.stats["continuity"].startswith("UNVERIFIED"):
                     quality += " · continuity unverified"
-                result = dict(frame=frame, pw_us=pw_us, bw_khz=bw_mhz*1e3,
-                              chirp_rate=(bw_mhz/pw_us*1e12 if valid else math.nan),
+                result = dict(frame=frame, pw_us=pw_us, bw_khz=bw_khz,
+                              chirp_rate=(bw_khz/pw_us*1e9 if valid else math.nan),
+                              pulse_contrast_db=pulse["contrast_db"], duty_percent=100*pulse["duty"],
+                              offset_khz=pulse["f_offset_khz"],
                               power_dbfs=power_dbfs, clipping_percent=clipping_percent,
                               quality=quality, inference_ms=duration_ms,
                               completed_at=time.monotonic())
@@ -654,7 +582,8 @@ def run_dashboard():
             title = QtWidgets.QLabel("bladeRF  /  ESN PARAMETER ESTIMATION")
             title.setStyleSheet("font-size: 23px; font-weight: bold; color: #eaf3ff; padding: 8px;")
             outer.addWidget(title)
-            outer.addWidget(QtWidgets.QLabel("20 MSPS   ·   PRI 512 µs   ·   3 PRI = 1.536 ms   ·   30,720 complex samples   ·   Ts 50 ns"))
+            outer.addWidget(QtWidgets.QLabel("20 MSPS   ·   PRI 512 µs (fixed, not estimated)   ·   3 PRI = 1.536 ms   ·   "
+                                             "30,720 complex samples   ·   Ts 50 ns   ·   separate PW / BW readouts"))
             split = QtWidgets.QHBoxLayout()
             outer.addLayout(split, 1)
             controls_widget = QtWidgets.QWidget()
@@ -739,12 +668,12 @@ def run_dashboard():
             self.reference_pw = QtWidgets.QDoubleSpinBox()
             self.reference_pw.setRange(0.001, 512)
             self.reference_pw.setDecimals(6)
-            self.reference_pw.setValue(350)
+            self.reference_pw.setValue(325)
             self.reference_pw.setSuffix(" µs")
             self.reference_bw = QtWidgets.QDoubleSpinBox()
             self.reference_bw.setRange(0.001, 20000)
             self.reference_bw.setDecimals(3)
-            self.reference_bw.setValue(100)
+            self.reference_bw.setValue(3500)
             self.reference_bw.setSuffix(" kHz")
             reference_form.addRow("Compare", self.reference_mode)
             reference_form.addRow("UDP port", self.udp_port)
@@ -971,12 +900,16 @@ def run_dashboard():
                 self.bw_card.setText(f"{result['bw_khz']:.3f}")
                 self.rate_card.setText(f"{result['chirp_rate']:.3e}" if np.isfinite(result["chirp_rate"]) else "Invalid")
                 self.quality_label.setText(f"{result['quality']}  ·  prediction window #{frame.sequence}  ·  "
-                                          f"power {result['power_dbfs']:.1f} dBFS  ·  clipping {result['clipping_percent']:.3f}%")
+                                          f"power {result['power_dbfs']:.1f} dBFS  ·  clipping {result['clipping_percent']:.3f}%  ·  "
+                                          f"pulse/noise {result['pulse_contrast_db']:.1f} dB  ·  duty {result['duty_percent']:.1f}%  ·  "
+                                          f"offset {result['offset_khz']:+.1f} kHz")
                 if frame.sequence != self.seen_sequence:
                     self.seen_sequence = frame.sequence
                     record = dict(elapsed_s=result["completed_at"] - self.session.started_at,
                                              sequence=frame.sequence, pw_us=result["pw_us"],
                                              bw_khz=result["bw_khz"], chirp_rate_Hz_per_s=result["chirp_rate"],
+                                             pulse_contrast_db=result["pulse_contrast_db"],
+                                             duty_percent=result["duty_percent"], offset_khz=result["offset_khz"],
                                              inference_ms=result["inference_ms"], quality=result["quality"])
                     record.update(result.get("comparison", {}))
                     self.records.append(record)
