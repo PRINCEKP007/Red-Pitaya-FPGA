@@ -223,6 +223,13 @@ wire                        trig_mod_op;
 
 wire                        cfg_avg_en; 
 wire                        cfg_hres_en;
+wire [             4-1:0]   cfg_cs_en;
+wire [            11-1:0]   cfg_cs_blk_len;
+wire [            11-1:0]   cfg_cs_tbl_len;
+wire [             5-1:0]   cfg_cs_shift;
+wire                        cfg_cs_tbl_we;
+wire [            10-1:0]   cfg_cs_tbl_addr;
+wire [            16-1:0]   cfg_cs_tbl_data;
 wire [  DEC_CNT_BITS-1:0]   cfg_dec_factor;  
 wire [DEC_SHIFT_BITS-1:0]   cfg_dec_rshift;  
 wire [            32-1:0]   cfg_loopback;
@@ -464,6 +471,13 @@ scope_cfg #(
   .cfg_dec_rshift_o         (cfg_dec_rshift),
   .cfg_avg_en_o             (cfg_avg_en),
   .cfg_hres_en_o            (cfg_hres_en),
+  .cfg_cs_en_o              (cfg_cs_en),
+  .cfg_cs_blk_len_o         (cfg_cs_blk_len),
+  .cfg_cs_tbl_len_o         (cfg_cs_tbl_len),
+  .cfg_cs_shift_o           (cfg_cs_shift),
+  .cfg_cs_tbl_we_o          (cfg_cs_tbl_we),
+  .cfg_cs_tbl_addr_o        (cfg_cs_tbl_addr),
+  .cfg_cs_tbl_data_o        (cfg_cs_tbl_data),
   .cfg_loopback_o           (cfg_loopback),
   .cfg_8bit_dat_o           (cfg_8bit_dat),
   .cfg_legacy_calib_o       (cfg_legacy_calib),
@@ -559,6 +573,13 @@ osc_top #(
   .cfg_dec_rshift_i         (cfg_dec_rshift),
   .cfg_avg_en_i             (cfg_avg_en),
   .cfg_hres_en_i            (cfg_hres_en),
+  .cfg_cs_en_i              (cfg_cs_en[GV]),
+  .cfg_cs_blk_len_i         (cfg_cs_blk_len),
+  .cfg_cs_tbl_len_i         (cfg_cs_tbl_len),
+  .cfg_cs_shift_i           (cfg_cs_shift),
+  .cfg_cs_tbl_we_i          (cfg_cs_tbl_we),
+  .cfg_cs_tbl_addr_i        (cfg_cs_tbl_addr),
+  .cfg_cs_tbl_data_i        (cfg_cs_tbl_data),
   .cfg_loopback_i           ({ramp_en[GV],loopback_gpio[GV],loopback_dac[GV]}),
   .cfg_8bit_dat_i           (cfg_8bit_dat),
   .cfg_legacy_calib_i       (cfg_legacy_calib),

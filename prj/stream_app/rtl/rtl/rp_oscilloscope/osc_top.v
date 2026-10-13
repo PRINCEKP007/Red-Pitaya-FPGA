@@ -41,6 +41,13 @@ module osc_top
   input  wire [  DEC_SHIFT_BITS-1:0]      cfg_dec_rshift_i        ,
   input  wire                             cfg_avg_en_i            ,
   input  wire                             cfg_hres_en_i           ,
+  input  wire                             cfg_cs_en_i             ,
+  input  wire [              11-1:0]      cfg_cs_blk_len_i        ,
+  input  wire [              11-1:0]      cfg_cs_tbl_len_i        ,
+  input  wire [               5-1:0]      cfg_cs_shift_i          ,
+  input  wire                             cfg_cs_tbl_we_i         ,
+  input  wire [              10-1:0]      cfg_cs_tbl_addr_i       ,
+  input  wire [              16-1:0]      cfg_cs_tbl_data_i       ,
   input  wire [               3-1:0]      cfg_loopback_i          ,
   input  wire                             cfg_8bit_dat_i          ,
   input  wire                             cfg_legacy_calib_i      ,
@@ -137,6 +144,10 @@ wire [S_AXIS_DATA_BITS-1:0] dec_indata;
 wire [S_AXIS_DATA_BITS-1:0] dec_tdata;    
 wire                        dec_tvalid;   
 wire                        dec_tready;   
+wire [S_AXIS_DATA_BITS-1:0] osc_dec_tdata;
+wire                        osc_dec_tvalid;
+wire [S_AXIS_DATA_BITS-1:0] cs_tdata;
+wire                        cs_tvalid;
 wire                        ramp_en;
 wire                        loopback_gpio;
 wire                        loopback_dac;
@@ -330,14 +341,42 @@ osc_decimator #(
   .s_axis_tdata   (dec_indata),          
   .s_axis_tvalid  (dec_src_tvalid),     
   .s_axis_tready  (filt_tready),                                                                 
-  .m_axis_tdata   (dec_tdata),          
-  .m_axis_tvalid  (dec_tvalid),    
+  .m_axis_tdata   (osc_dec_tdata),          
+  .m_axis_tvalid  (osc_dec_tvalid),    
   .m_axis_tready  (dec_tready),      
   .ctl_rst        (event_num_reset),                                                                     
   .cfg_avg_en     (cfg_avg_en_i),            
   .cfg_hres_en    (cfg_hres_en_i),
   .cfg_dec_factor (cfg_dec_factor_i),        
   .cfg_dec_rshift (cfg_dec_rshift_i));       
+
+////////////////////////////////////////////////////////////
+// Name : Compressive measurement
+// Replaces the decimator when enabled: one weighted sum per
+// block of N samples, see osc_cs.v
+////////////////////////////////////////////////////////////
+
+osc_cs #(
+  .AXIS_DATA_BITS (S_AXIS_DATA_BITS))
+  U_osc_cs(
+  .clk            (clk_adc),
+  .rst_n          (rstn_dec),
+  .s_axis_tdata   (dec_indata),
+  .s_axis_tvalid  (dec_src_tvalid),
+  .s_axis_tready  (),
+  .m_axis_tdata   (cs_tdata),
+  .m_axis_tvalid  (cs_tvalid),
+  .m_axis_tready  (dec_tready),
+  .cfg_en         (cfg_cs_en_i),
+  .cfg_blk_len    (cfg_cs_blk_len_i),
+  .cfg_tbl_len    (cfg_cs_tbl_len_i),
+  .cfg_shift      (cfg_cs_shift_i),
+  .tbl_we         (cfg_cs_tbl_we_i),
+  .tbl_waddr      (cfg_cs_tbl_addr_i),
+  .tbl_wdata      (cfg_cs_tbl_data_i));
+
+assign dec_tdata  = cfg_cs_en_i ? cs_tdata  : osc_dec_tdata;
+assign dec_tvalid = cfg_cs_en_i ? cs_tvalid : osc_dec_tvalid;
 
 ////////////////////////////////////////////////////////////
 // Name : Trigger

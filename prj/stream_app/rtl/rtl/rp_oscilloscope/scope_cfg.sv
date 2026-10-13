@@ -80,6 +80,13 @@ module scope_cfg
    output wire [  DEC_SHIFT_BITS-1:0]  cfg_dec_rshift_o        ,
    output wire                         cfg_avg_en_o            ,
    output wire                         cfg_hres_en_o           ,
+   output wire [               4-1:0]  cfg_cs_en_o             ,
+   output wire [              11-1:0]  cfg_cs_blk_len_o        ,
+   output wire [              11-1:0]  cfg_cs_tbl_len_o        ,
+   output wire [               5-1:0]  cfg_cs_shift_o          ,
+   output wire                         cfg_cs_tbl_we_o         ,
+   output wire [              10-1:0]  cfg_cs_tbl_addr_o       ,
+   output wire [              16-1:0]  cfg_cs_tbl_data_o       ,
    output wire [              32-1:0]  cfg_loopback_o          ,
    output wire                         cfg_8bit_dat_o          ,
    output wire                         cfg_legacy_calib_o      ,
@@ -171,6 +178,12 @@ localparam CALIB_GAIN_ADDR_CH1      = 12'h78;  // Calibraton gain CH1
 localparam CALIB_OFFSET_ADDR_CH2    = 12'h7C;  // Calibraton offset CH2
 localparam CALIB_GAIN_ADDR_CH2      = 12'h80;  // Calibraton gain CH2
 localparam LEGACY_CALIB_EN_ADDR     = 12'h84;  // bit0 enables legacy post-filter calibration
+localparam CS_CTRL_ADDR             = 12'h88;  // compressive measurement: bit n enables channel n+1
+localparam CS_BLK_LEN_ADDR          = 12'h8C;  // samples per measurement N (1..1024)
+localparam CS_TBL_LEN_ADDR          = 12'h90;  // weight table period L (1..1024, multiple of N)
+localparam CS_SHIFT_ADDR            = 12'h94;  // output right shift
+localparam CS_TBL_ADDR_ADDR         = 12'h98;  // weight table write pointer
+localparam CS_TBL_DATA_ADDR         = 12'hB0;  // write weight at pointer, pointer auto-increments
 localparam BUF1_LOST_SAMP_CNT_CH2   = 12'h9C;  // Number of lost samples in buffer 1
 localparam BUF2_LOST_SAMP_CNT_CH2   = 12'hA0;  // Number of lost samples in buffer 2
 localparam CURR_WP_CH1              = 12'hA4;  //current write pointer CH1
@@ -238,6 +251,14 @@ reg                         cfg_trig_edge;
 
 reg                         cfg_avg_en; 
 reg                         cfg_hres_en;
+reg  [             4-1:0]   cfg_cs_en;
+reg  [            11-1:0]   cfg_cs_blk_len;
+reg  [            11-1:0]   cfg_cs_tbl_len;
+reg  [             5-1:0]   cfg_cs_shift;
+reg                         cfg_cs_tbl_we;
+reg  [            10-1:0]   cfg_cs_tbl_addr;
+reg  [            10-1:0]   cfg_cs_tbl_waddr;
+reg  [            16-1:0]   cfg_cs_tbl_data;
 reg  [  DEC_CNT_BITS-1:0]   cfg_dec_factor;  
 reg  [DEC_SHIFT_BITS-1:0]   cfg_dec_rshift;  
 reg  [            32-1:0]   cfg_loopback;
@@ -412,6 +433,14 @@ begin
       cfg_dec_rshift          <=   'h0;
       cfg_avg_en              <=  1'b0;
       cfg_hres_en             <=  1'b0;
+      cfg_cs_en               <=  4'h0;
+      cfg_cs_blk_len          <= 11'd10;
+      cfg_cs_tbl_len          <= 11'd1000;
+      cfg_cs_shift            <=  5'd20;
+      cfg_cs_tbl_we           <=  1'b0;
+      cfg_cs_tbl_addr         <= 10'h0;
+      cfg_cs_tbl_waddr        <= 10'h0;
+      cfg_cs_tbl_data         <= 16'h0;
       cfg_loopback            <= 32'h0;
       cfg_filt_bypass         <=  1'b1;
       cfg_8bit_dat            <=  1'b0;
@@ -441,6 +470,20 @@ begin
       if (reg_write_adc && (reg_ofs_adc[12-1:0]==SHIFT_8BIT)            )  cfg_8bit_dat            <= reg_wdat_adc[0];
       if (reg_write_adc && (reg_ofs_adc[12-1:0]==FILT_BYPASS_ADDR)      )  cfg_filt_bypass         <= reg_wdat_adc[0];
       if (reg_write_adc && (reg_ofs_adc[12-1:0]==LEGACY_CALIB_EN_ADDR)  )  cfg_legacy_calib        <= reg_wdat_adc[0];
+      if (reg_write_adc && (reg_ofs_adc[12-1:0]==CS_CTRL_ADDR)          )  cfg_cs_en               <= reg_wdat_adc[4-1:0];
+      if (reg_write_adc && (reg_ofs_adc[12-1:0]==CS_BLK_LEN_ADDR)       )  cfg_cs_blk_len          <= reg_wdat_adc[11-1:0];
+      if (reg_write_adc && (reg_ofs_adc[12-1:0]==CS_TBL_LEN_ADDR)       )  cfg_cs_tbl_len          <= reg_wdat_adc[11-1:0];
+      if (reg_write_adc && (reg_ofs_adc[12-1:0]==CS_SHIFT_ADDR)         )  cfg_cs_shift            <= reg_wdat_adc[5-1:0];
+
+      // weight table: writing DATA stores it at the pointer and advances the pointer
+      cfg_cs_tbl_we <= reg_write_adc && (reg_ofs_adc[12-1:0]==CS_TBL_DATA_ADDR);
+      if (reg_write_adc && (reg_ofs_adc[12-1:0]==CS_TBL_DATA_ADDR)) begin
+        cfg_cs_tbl_data  <= reg_wdat_adc[16-1:0];
+        cfg_cs_tbl_waddr <= cfg_cs_tbl_addr;
+        cfg_cs_tbl_addr  <= cfg_cs_tbl_addr + 1'b1;
+      end else if (reg_write_adc && (reg_ofs_adc[12-1:0]==CS_TBL_ADDR_ADDR)) begin
+        cfg_cs_tbl_addr  <= reg_wdat_adc[10-1:0];
+      end
 
       if (reg_write_adc && (reg_ofs_adc[12-1:0]==CALIB_OFFSET_ADDR_CH1) )  cfg_calib_offset[1*16-1:0*16]  <= reg_wdat_adc[16-1:0];
       if (reg_write_adc && (reg_ofs_adc[12-1:0]==CALIB_OFFSET_ADDR_CH2) )  cfg_calib_offset[2*16-1:1*16]  <= reg_wdat_adc[16-1:0];
@@ -499,6 +542,11 @@ begin
       LOOPBACK_ADDR          : begin  reg_ack_adc = 1'b1;       reg_rdat_adc =                               cfg_loopback;              end
       SHIFT_8BIT             : begin  reg_ack_adc = 1'b1;       reg_rdat_adc = {{32- 1{1'b0}}              , cfg_8bit_dat};             end
       LEGACY_CALIB_EN_ADDR   : begin  reg_ack_adc = 1'b1;       reg_rdat_adc = {{32- 1{1'b0}}              , cfg_legacy_calib};         end
+      CS_CTRL_ADDR           : begin  reg_ack_adc = 1'b1;       reg_rdat_adc = {{32- 4{1'b0}}              , cfg_cs_en};                end
+      CS_BLK_LEN_ADDR        : begin  reg_ack_adc = 1'b1;       reg_rdat_adc = {{32-11{1'b0}}              , cfg_cs_blk_len};           end
+      CS_TBL_LEN_ADDR        : begin  reg_ack_adc = 1'b1;       reg_rdat_adc = {{32-11{1'b0}}              , cfg_cs_tbl_len};           end
+      CS_SHIFT_ADDR          : begin  reg_ack_adc = 1'b1;       reg_rdat_adc = {{32- 5{1'b0}}              , cfg_cs_shift};             end
+      CS_TBL_ADDR_ADDR       : begin  reg_ack_adc = 1'b1;       reg_rdat_adc = {{32-10{1'b0}}              , cfg_cs_tbl_addr};          end
 
       DIAG_REG1              : begin  reg_ack_adc = 1'b1;       reg_rdat_adc =                                diag1_i;                  end
       DIAG_REG2              : begin  reg_ack_adc = 1'b1;       reg_rdat_adc =                                diag2_i;                  end
@@ -645,6 +693,13 @@ assign cfg_dec_factor_o        = cfg_dec_factor;
 assign cfg_dec_rshift_o        = cfg_dec_rshift;
 assign cfg_avg_en_o            = cfg_avg_en;
 assign cfg_hres_en_o           = cfg_hres_en;
+assign cfg_cs_en_o             = cfg_cs_en;
+assign cfg_cs_blk_len_o        = cfg_cs_blk_len;
+assign cfg_cs_tbl_len_o        = cfg_cs_tbl_len;
+assign cfg_cs_shift_o          = cfg_cs_shift;
+assign cfg_cs_tbl_we_o         = cfg_cs_tbl_we;
+assign cfg_cs_tbl_addr_o       = cfg_cs_tbl_waddr;
+assign cfg_cs_tbl_data_o       = cfg_cs_tbl_data;
 assign cfg_loopback_o          = cfg_loopback;
 assign cfg_8bit_dat_o          = cfg_8bit_dat;
 assign cfg_legacy_calib_o      = cfg_legacy_calib;
